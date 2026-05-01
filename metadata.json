@@ -1,0 +1,9 @@
+{
+  "name": "AASA — Aadhaar for Stray Animals",
+  "description": "A unified digital identity and rescue coordination system for stray animals in Sangli District. Features AI vision triage, live mapping, and multi-role dashboards for citizens, volunteers, and NGOs.",
+  "requestFramePermissions": [
+    "camera",
+    "geolocation"
+  ],
+  "majorCapabilities": []
+}
