@@ -1,5 +1,8 @@
 import { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
+import { signInWithPopup, signInWithEmailAndPassword, sendPasswordResetEmail } from 'firebase/auth';
+import { auth, googleProvider } from '../lib/firebase';
+import { useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Dog, 
@@ -31,41 +34,86 @@ export default function AuthPage({ onLogin }: AuthPageProps) {
   const [step, setStep] = useState(initialRole ? 2 : 1);
   const [loading, setLoading] = useState(false);
 
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+
+  // Auth state is handled by the handleNext popup logic and App.tsx listener.
+  useEffect(() => {
+    setLoading(false);
+  }, []);
+
   const handleNext = async () => {
     if (step === 1 && selectedRole) {
       setStep(2);
     } else if (step === 2) {
       setLoading(true);
+      console.log('[Auth] Starting login for role:', selectedRole);
       
-      let email = '';
-      if (selectedRole === 'CITIZEN') email = 'sujalpatil@sangli.in';
-      if (selectedRole === 'VOLUNTEER') email = 'volunteer@aasa.org';
-      if (selectedRole === 'NGO') email = 'ngo@animalrahat.org';
-      if (selectedRole === 'ADMIN') email = 'admin@sangli.gov';
-
       try {
+        let firebaseUser;
+        if (selectedRole === 'CITIZEN' || selectedRole === 'VOLUNTEER') {
+          const result = await signInWithPopup(auth, googleProvider);
+          firebaseUser = result.user;
+        } else {
+          const result = await signInWithEmailAndPassword(auth, email, password);
+          firebaseUser = result.user;
+        }
+
+        const idToken = await firebaseUser.getIdToken();
         const response = await fetch('/api/auth/login', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email })
+          headers: { 
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${idToken}`
+          },
+          body: JSON.stringify({ 
+            email: firebaseUser.email,
+            name: firebaseUser.displayName || email.split('@')[0],
+            role: selectedRole
+          })
         });
         
         const data = await response.json();
         if (data.success) {
           onLogin(data.user);
         } else {
-          console.error('Login failed', data.message);
-          setLoading(false);
+          // Show the specific error from the backend (e.g. "Invalid token", "Key mismatch")
+          alert(`Backend login failed: ${data.error || data.message || 'Unknown error'}`);
         }
-      } catch (err) {
-        console.error('API Error', err);
+      } catch (err: any) {
+        console.error('[Auth] Login Error:', err);
+        alert(err.message || 'Authentication error occurred');
+      } finally {
         setLoading(false);
       }
     }
   };
 
+  const handlePasswordReset = async () => {
+    if (!email) {
+      alert("Please enter your email first to reset your password.");
+      return;
+    }
+    try {
+      await sendPasswordResetEmail(auth, email);
+      alert("Password reset email sent!");
+    } catch (err: any) {
+      console.error(err);
+      alert("Failed to send reset email: " + err.message);
+    }
+  };
+
   const SelectedRoleData = selectedRole ? roles.find(r => r.role === selectedRole) : null;
   const SelectedIcon = SelectedRoleData?.icon;
+
+  if (loading && step === 1) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-paper gap-4">
+        <div className="w-12 h-12 border-4 border-primary border-t-transparent rounded-full animate-spin shadow-2xl shadow-primary/20" />
+        <p className="font-mono text-[10px] text-white/30 uppercase tracking-[4px] animate-pulse">Authenticating with AASA...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center p-6 relative overflow-hidden bg-paper pattern-bg">
@@ -176,24 +224,39 @@ export default function AuthPage({ onLogin }: AuthPageProps) {
                 </div>
               </div>
 
-              <div className="space-y-6">
-                <div className="space-y-2">
-                  <label className="font-mono text-[10px] font-bold uppercase tracking-[2px] text-white/20 ml-1">Email Access</label>
-                  <input 
-                    type="email" 
-                    defaultValue="sujalpatil@sangli.in" 
-                    className="w-full p-4 rounded-2xl bg-white/5 border border-white/5 focus:border-white/20 focus:ring-4 focus:ring-white/5 outline-none text-sm font-medium placeholder:text-white/10 text-white"
-                  />
+              {(selectedRole === 'CITIZEN' || selectedRole === 'VOLUNTEER') ? (
+                <div className="space-y-6">
+                  <p className="text-center text-white/50 text-sm mb-4">
+                    Sign in with your Google account to access your {selectedRole.toLowerCase()} dashboard.
+                  </p>
                 </div>
-                <div className="space-y-2">
-                  <label className="font-mono text-[10px] font-bold uppercase tracking-[2px] text-white/20 ml-1">Security Key</label>
-                  <input 
-                    type="password" 
-                    defaultValue="••••••••" 
-                    className="w-full p-4 rounded-2xl bg-white/5 border border-white/5 focus:border-white/20 focus:ring-4 focus:ring-white/5 outline-none text-sm font-medium placeholder:text-white/10 text-white"
-                  />
+              ) : (
+                <div className="space-y-6">
+                  <div className="space-y-2">
+                    <label className="font-mono text-[10px] font-bold uppercase tracking-[2px] text-white/20 ml-1">Email Access</label>
+                    <input 
+                      type="email" 
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      placeholder="official@sangli.gov" 
+                      className="w-full p-4 rounded-2xl bg-white/5 border border-white/5 focus:border-white/20 focus:ring-4 focus:ring-white/5 outline-none text-sm font-medium placeholder:text-white/10 text-white"
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center ml-1 mb-1">
+                      <label className="font-mono text-[10px] font-bold uppercase tracking-[2px] text-white/20">Security Key</label>
+                      <button onClick={handlePasswordReset} type="button" className="text-[10px] text-primary hover:underline">Forgot?</button>
+                    </div>
+                    <input 
+                      type="password" 
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="••••••••" 
+                      className="w-full p-4 rounded-2xl bg-white/5 border border-white/5 focus:border-white/20 focus:ring-4 focus:ring-white/5 outline-none text-sm font-medium placeholder:text-white/10 text-white"
+                    />
+                  </div>
                 </div>
-              </div>
+              )}
 
               {selectedRole === 'ADMIN' && (
                 <div className="bg-rose-500/10 border border-rose-500/20 p-4 rounded-2xl flex items-center gap-3">
@@ -215,7 +278,9 @@ export default function AuthPage({ onLogin }: AuthPageProps) {
                     Authenticating...
                   </>
                 ) : (
-                  <>Sign In to AASA Platform <ArrowRight size={20} /></>
+                  (selectedRole === 'CITIZEN' || selectedRole === 'VOLUNTEER') 
+                    ? <>Continue with Google <ArrowRight size={20} /></> 
+                    : <>Sign In to AASA Platform <ArrowRight size={20} /></>
                 )}
               </button>
             </motion.div>

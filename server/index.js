@@ -1,6 +1,50 @@
 import express from 'express';
 import cors from 'cors';
 import { query, run, get } from './db.js';
+import admin from 'firebase-admin';
+import dotenv from 'dotenv';
+dotenv.config();
+
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+try {
+  const serviceAccountPath = path.resolve(__dirname, '../serviceAccountKey.json');
+  if (fs.existsSync(serviceAccountPath)) {
+    const serviceAccount = JSON.parse(fs.readFileSync(serviceAccountPath, 'utf8'));
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+      projectId: serviceAccount.project_id
+    });
+    console.log(`Firebase Admin SDK initialized successfully for project: ${serviceAccount.project_id}`);
+  } else {
+    console.warn('serviceAccountKey.json not found, falling back to mock auth.');
+  }
+} catch (e) {
+  console.warn('Firebase Admin initialization failed:', e.message);
+}
+
+const verifyToken = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    if (!admin.apps.length) return next(); 
+    return res.status(401).json({ error: 'Unauthorized: No token provided' });
+  }
+  const token = authHeader.split('Bearer ')[1];
+  try {
+    if (!admin.apps.length) return next();
+    const decodedToken = await admin.auth().verifyIdToken(token);
+    req.user = decodedToken;
+    next();
+  } catch (error) {
+    console.error('[Backend Auth Error]:', error.message);
+    return res.status(401).json({ error: `Unauthorized: ${error.message}` });
+  }
+};
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -11,26 +55,76 @@ app.use(express.json({ limit: '10mb' })); // allow base64 photos
 // ─────────────────────────────────────────────────────────
 // AUTH API
 // ─────────────────────────────────────────────────────────
-app.post('/api/auth/login', async (req, res) => {
-  const { email } = req.body;
+app.post('/api/auth/login', verifyToken, async (req, res) => {
+  const { email, name, role } = req.body;
+  console.log(`[Backend] Login request received for: ${email} (Role: ${role})`);
+  // If verifyToken succeeded, req.user has the Firebase info.
+  // If admin SDK is not initialized (fallback), we generate a mock ID.
+  const uid = req.user ? req.user.uid : 'mock_' + Date.now();
+  const userEmail = req.user ? req.user.email : email;
+
   try {
-    const user = await get('SELECT * FROM users WHERE email = ?', [email]);
-    if (user) {
-      res.json({ success: true, user });
+    let user = await get('SELECT * FROM users WHERE email = ?', [userEmail]);
+    if (!user) {
+      // Create user in SQLite
+      await run('INSERT INTO users (id, name, email, role) VALUES (?, ?, ?, ?)', [
+        uid, name || 'New User', userEmail, role || 'CITIZEN'
+      ]);
+      user = await get('SELECT * FROM users WHERE email = ?', [userEmail]);
     } else {
-      res.status(401).json({ success: false, message: 'Invalid credentials' });
+      // Ensure role is correct if they signed up with Google but exist as staff
+      if (user.role !== role && (role === 'CITIZEN' || role === 'VOLUNTEER')) {
+        // Only update role if they are claiming a public role, we don't let them claim ADMIN here
+        await run('UPDATE users SET name = ? WHERE email = ?', [name || user.name, userEmail]);
+      }
     }
+    res.json({ success: true, user });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get('/api/auth/me', async (req, res) => {
-  const email = req.query.email || 'sujalpatil@sangli.in';
+app.get('/api/auth/me', verifyToken, async (req, res) => {
+  const email = req.user ? req.user.email : req.query.email;
   try {
     const user = await get('SELECT * FROM users WHERE email = ?', [email]);
     if (user) res.json({ user });
-    else res.status(404).json({ error: 'User not found' });
+    else res.status(404).json({ error: 'User not found in local database' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/auth/invite', verifyToken, async (req, res) => {
+  const { email, name, role, tempPassword } = req.body;
+  // Only Admin can invite
+  try {
+    if (req.user) {
+      const adminUser = await get('SELECT * FROM users WHERE email = ?', [req.user.email]);
+      if (!adminUser || adminUser.role !== 'ADMIN') {
+        return res.status(403).json({ error: 'Forbidden: Admins only' });
+      }
+    }
+
+    if (admin.apps.length) {
+      // Create user in Firebase
+      const newFirebaseUser = await admin.auth().createUser({
+        email,
+        password: tempPassword,
+        displayName: name,
+      });
+      // Insert into local DB
+      await run('INSERT INTO users (id, name, email, role) VALUES (?, ?, ?, ?)', [
+        newFirebaseUser.uid, name, email, role
+      ]);
+    } else {
+      // Mock mode
+      await run('INSERT INTO users (id, name, email, role) VALUES (?, ?, ?, ?)', [
+        'staff_' + Date.now(), name, email, role
+      ]);
+    }
+    
+    res.json({ success: true, message: 'User created successfully' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

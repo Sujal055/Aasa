@@ -9,8 +9,11 @@ import CitizenDashboard from './pages/CitizenDashboard';
 import VolunteerDashboard from './pages/VolunteerDashboard';
 import NGODashboard from './pages/NGODashboard';
 import AdminDashboard from './pages/AdminDashboard';
-import { Bell, LogOut, ChevronDown } from 'lucide-react';
+import ProfilePage from './pages/ProfilePage';
+import { Bell, LogOut, ChevronDown, User as UserIcon } from 'lucide-react';
 import { cn } from './lib/utils';
+import { onAuthStateChanged, signOut } from 'firebase/auth';
+import { auth } from './lib/firebase';
 
 // Role-specific accent colors using proper CSS custom properties
 const roleColor: Record<UserRole, string> = {
@@ -34,23 +37,46 @@ function Main() {
   const navigate = useNavigate();
 
   useEffect(() => {
-    try {
-      const savedUser = localStorage.getItem('aasa_user');
-      if (savedUser) setUser(JSON.parse(savedUser));
-    } catch (e) {
-      console.error('Failed to load user from storage:', e);
-    } finally {
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      console.log('[App] Auth State Changed:', firebaseUser?.email || 'Logged Out');
+      if (firebaseUser) {
+        try {
+          const res = await fetch(`/api/auth/me?email=${firebaseUser.email}`);
+          if (res.ok) {
+            const data = await res.json();
+            console.log('[App] Found user in DB:', data.user.role);
+            setUser(data.user);
+            localStorage.setItem('aasa_user', JSON.stringify(data.user));
+          } else {
+            console.log('[App] User not in DB yet (needs sync)');
+            const savedUser = localStorage.getItem('aasa_user');
+            if (savedUser) setUser(JSON.parse(savedUser));
+          }
+        } catch (e) {
+          console.error('[App] Auth Fetch Error:', e);
+        }
+      } else {
+        setUser(null);
+        localStorage.removeItem('aasa_user');
+      }
       setLoading(false);
-    }
+    });
+
+    return () => unsubscribe();
   }, []);
 
+  // ... (Session Timeout)
+
   const handleLogin = (userData: User) => {
+    console.log('[App] handleLogin triggered for:', userData.email);
     setUser(userData);
     localStorage.setItem('aasa_user', JSON.stringify(userData));
-    navigate('/');
+    console.log('[App] Navigating to home...');
+    setTimeout(() => navigate('/'), 0);
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    await signOut(auth);
     setUser(null);
     localStorage.removeItem('aasa_user');
     navigate('/');
@@ -124,6 +150,14 @@ function Main() {
                     </button>
                   ))}
                   <div className="border-t border-white/5" />
+                  <Link
+                    to="/profile"
+                    onClick={() => setRoleMenuOpen(false)}
+                    className="w-full text-left px-4 py-3 flex items-center gap-2 text-xs font-bold text-white/50 hover:text-white transition-all hover:bg-white/5"
+                  >
+                    <UserIcon size={12} /> My Profile
+                  </Link>
+                  <div className="border-t border-white/5" />
                   <button
                     onClick={handleLogout}
                     className="w-full text-left px-4 py-3 flex items-center gap-2 text-xs font-bold text-white/30 hover:text-rose-400 hover:bg-rose-500/5 transition-all"
@@ -147,6 +181,7 @@ function Main() {
           <Route path="/"       element={user ? <Navigate to={`/${user.role.toLowerCase()}`} /> : <LandingPage />} />
           <Route path="/about"  element={<AboutPage />} />
           <Route path="/auth"   element={user ? <Navigate to="/" /> : <AuthPage onLogin={handleLogin} />} />
+          <Route path="/profile" element={user ? <ProfilePage user={user} /> : <Navigate to="/auth" />} />
 
           <Route path="/citizen/*"   element={user?.role === 'CITIZEN'   ? <CitizenDashboard user={user} />   : <Navigate to="/auth" />} />
           <Route path="/volunteer/*" element={user?.role === 'VOLUNTEER' ? <VolunteerDashboard user={user} /> : <Navigate to="/auth" />} />
